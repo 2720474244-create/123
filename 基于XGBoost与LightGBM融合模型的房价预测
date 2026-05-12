@@ -1,0 +1,305 @@
+# ============================================================
+# 基于XGBoost与LightGBM融合模型的房价预测
+# ============================================================
+
+# ======================
+# 导入相关库
+# ======================
+
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import KFold, cross_val_score
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestRegressor
+
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+
+import warnings
+warnings.filterwarnings('ignore')
+
+
+# ======================
+# 读取数据
+# ======================
+
+train_data = pd.read_csv("train.csv")
+test_data = pd.read_csv("test.csv")
+
+print("训练集维度:", train_data.shape)
+print("测试集维度:", test_data.shape)
+
+
+# ======================
+# 数据预处理
+# ======================
+
+# 保存ID
+train_id = train_data['Id']
+test_id = test_data['Id']
+
+# 删除ID列
+train_data.drop("Id", axis=1, inplace=True)
+test_data.drop("Id", axis=1, inplace=True)
+
+# 对房价进行对数变换
+train_data['SalePrice'] = np.log1p(train_data['SalePrice'])
+
+# 提取标签
+y_train = train_data['SalePrice']
+
+# 合并训练集和测试集
+all_data = pd.concat(
+    (train_data.drop(['SalePrice'], axis=1),
+     test_data)
+).reset_index(drop=True)
+
+print("合并后数据维度:", all_data.shape)
+
+
+# ======================
+# 缺失值处理
+# ======================
+
+numeric_features = all_data.select_dtypes(
+    exclude=["object"]).columns
+
+categorical_features = all_data.select_dtypes(
+    include=["object"]).columns
+
+# 数值特征
+for col in numeric_features:
+    all_data[col] = all_data[col].fillna(
+        all_data[col].median())
+
+# 类别特征
+for col in categorical_features:
+    all_data[col] = all_data[col].fillna(
+        all_data[col].mode()[0])
+
+
+# ======================
+# 特征编码
+# ======================
+
+for col in categorical_features:
+    lbl = LabelEncoder()
+    all_data[col] = lbl.fit_transform(
+        all_data[col])
+
+
+# ======================
+# 划分数据
+# ======================
+
+X_train = all_data[:len(train_data)]
+X_test = all_data[len(train_data):]
+
+print("训练数据维度:", X_train.shape)
+print("测试数据维度:", X_test.shape)
+
+
+# ======================
+# 交叉验证函数
+# ======================
+
+n_folds = 10
+
+def rmse_cv(model):
+
+    kf = KFold(
+        n_folds,
+        shuffle=True,
+        random_state=42
+    )
+
+    rmse = np.sqrt(
+        -cross_val_score(
+            model,
+            X_train,
+            y_train,
+            scoring="neg_mean_squared_error",
+            cv=kf
+        )
+    )
+
+    return rmse
+
+
+# ======================
+# Random Forest模型
+# ======================
+
+rf_model = RandomForestRegressor(
+    n_estimators=300,
+    max_depth=10,
+    random_state=42
+)
+
+rf_score = rmse_cv(rf_model)
+
+print("\nRandom Forest RMSE:")
+print("平均RMSE:", rf_score.mean())
+
+
+# ======================
+# XGBoost模型
+# ======================
+
+xgb_model = XGBRegressor(
+    n_estimators=2000,
+    learning_rate=0.05,
+    max_depth=4,
+    min_child_weight=3,
+    subsample=0.8,
+    colsample_bytree=0.7,
+    objective='reg:squarederror',
+    random_state=42
+)
+
+xgb_score = rmse_cv(xgb_model)
+
+print("\nXGBoost RMSE:")
+print("平均RMSE:", xgb_score.mean())
+
+
+# ======================
+# LightGBM模型
+# ======================
+
+lgb_model = LGBMRegressor(
+    objective='regression',
+    num_leaves=31,
+    learning_rate=0.05,
+    n_estimators=2000,
+    max_depth=-1,
+    random_state=42
+)
+
+lgb_score = rmse_cv(lgb_model)
+
+print("\nLightGBM RMSE:")
+print("平均RMSE:", lgb_score.mean())
+
+
+# ======================
+# 训练模型
+# ======================
+
+xgb_model.fit(X_train, y_train)
+lgb_model.fit(X_train, y_train)
+
+
+# ======================
+# 模型预测
+# ======================
+
+xgb_pred = np.expm1(
+    xgb_model.predict(X_test)
+)
+
+lgb_pred = np.expm1(
+    lgb_model.predict(X_test)
+)
+
+
+# ======================
+# 模型融合
+# ======================
+
+final_pred = 0.5 * xgb_pred + 0.5 * lgb_pred
+
+
+# ======================
+# 保存结果
+# ======================
+
+submission = pd.DataFrame()
+
+submission['Id'] = test_id
+submission['SalePrice'] = final_pred
+
+submission.to_csv(
+    "submission.csv",
+    index=False
+)
+
+print("\n预测文件submission.csv已生成")
+
+
+# ======================
+# 输出实验结果
+# ======================
+
+print("\n====================")
+print("模型性能对比")
+print("====================")
+
+print("Random Forest:",
+      rf_score.mean())
+
+print("XGBoost:",
+      xgb_score.mean())
+
+print("LightGBM:",
+      lgb_score.mean())
+
+print("====================")
+
+
+# ======================
+# 特征重要性分析
+# ======================
+
+feature_importance = pd.DataFrame()
+
+feature_importance['Feature'] = X_train.columns
+
+feature_importance['Importance'] = \
+    lgb_model.feature_importances_
+
+feature_importance = feature_importance.sort_values(
+    by='Importance',
+    ascending=False
+)
+
+print("\n最重要的10个特征：")
+
+print(feature_importance.head(10))
+
+
+# ============================================================
+# 环境说明
+# ============================================================
+
+"""
+Python版本：
+
+Python 3.10
+
+安装依赖：
+
+pip install pandas
+pip install numpy
+pip install scikit-learn
+pip install xgboost
+pip install lightgbm
+
+数据集：
+
+House Prices - Advanced Regression Techniques
+
+需要文件：
+
+train.csv
+test.csv
+
+运行方式：
+
+python main.py
+
+输出结果：
+
+submission.csv
+"""
